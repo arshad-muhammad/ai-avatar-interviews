@@ -9,10 +9,13 @@ import { Card, CardContent } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
+import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/contexts/AuthContext';
 
 const InterviewSetupPage = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { user } = useAuth();
   
   const [currentStep, setCurrentStep] = useState(1);
   const [jobTitle, setJobTitle] = useState('');
@@ -38,56 +41,153 @@ const InterviewSetupPage = () => {
   };
   
   const handleGenerateQuestions = async () => {
+    if (!jobTitle.trim() || !jobDescription.trim()) {
+      toast({
+        title: "Missing information",
+        description: "Please provide both job title and description to generate questions.",
+        variant: "destructive",
+      });
+      return;
+    }
+    
     setIsLoading(true);
     
     try {
-      // Mock API call to generate questions
-      setTimeout(() => {
-        const mockGeneratedQuestions = [
-          "What experience do you have with modern JavaScript frameworks like React?",
-          "Can you describe a challenging project you worked on and how you overcame obstacles?",
-          "How do you stay updated with the latest industry trends and technologies?",
-          "Describe your approach to debugging a complex issue in a large codebase.",
-          "How do you handle feedback and criticism of your work?",
-          "Tell me about a time when you had to learn a new technology quickly for a project."
-        ];
-        
-        setGeneratedQuestions(mockGeneratedQuestions);
+      // Call our Supabase Edge Function to generate questions
+      const { data, error } = await supabase.functions.invoke('generate-interview-questions', {
+        body: {
+          jobTitle,
+          jobDescription,
+          numberOfQuestions: 5
+        }
+      });
+      
+      if (error) {
+        throw new Error(error.message);
+      }
+      
+      if (data?.questions && Array.isArray(data.questions) && data.questions.length > 0) {
+        setGeneratedQuestions(data.questions);
         setCurrentStep(3);
-        setIsLoading(false);
         
         toast({
           title: "Questions generated",
           description: "AI has generated interview questions based on the job description.",
         });
-      }, 2000);
+      } else {
+        throw new Error("Failed to generate questions. Please try again.");
+      }
     } catch (error) {
+      console.error("Error generating questions:", error);
       toast({
         title: "Error",
-        description: "Failed to generate questions. Please try again.",
+        description: error instanceof Error ? error.message : "Failed to generate questions. Please try again.",
         variant: "destructive",
       });
+    } finally {
       setIsLoading(false);
     }
   };
   
-  const handleCreateInterview = () => {
-    // Combine custom and generated questions
-    const allQuestions = [...customQuestions.filter(q => q.trim() !== ''), ...generatedQuestions];
+  const handleCreateInterview = async () => {
+    if (!user) {
+      toast({
+        title: "Authentication required",
+        description: "Please sign in to create an interview.",
+        variant: "destructive",
+      });
+      navigate('/login');
+      return;
+    }
     
-    // Save to localStorage for demo purposes
-    localStorage.setItem('interviewSetup', JSON.stringify({
-      jobTitle,
-      jobDescription,
-      questions: allQuestions
-    }));
+    setIsLoading(true);
     
-    toast({
-      title: "Interview created",
-      description: "Your AI interview has been created successfully.",
-    });
-    
-    navigate('/interview/1234');
+    try {
+      // Create job entry
+      const { data: jobData, error: jobError } = await supabase
+        .from('jobs')
+        .insert({
+          company_id: user.id,
+          title: jobTitle,
+          description: jobDescription,
+        })
+        .select('id')
+        .single();
+      
+      if (jobError) throw jobError;
+      
+      // Generate access code and password
+      const accessCode = generateRandomCode(6);
+      const password = generateRandomPassword();
+      
+      // Create interview entry
+      const { data: interviewData, error: interviewError } = await supabase
+        .from('interviews')
+        .insert({
+          job_id: jobData.id,
+          title: `Interview for ${jobTitle}`,
+          access_code: accessCode,
+          password: password,
+        })
+        .select('id')
+        .single();
+      
+      if (interviewError) throw interviewError;
+      
+      // Combine custom and generated questions
+      const allQuestions = [
+        ...customQuestions.filter(q => q.trim() !== ''), 
+        ...generatedQuestions
+      ];
+      
+      // Insert questions
+      if (allQuestions.length > 0) {
+        const questionsToInsert = allQuestions.map((question, index) => ({
+          interview_id: interviewData.id,
+          question,
+          order_number: index + 1,
+          is_generated: index >= customQuestions.filter(q => q.trim() !== '').length
+        }));
+        
+        const { error: questionsError } = await supabase
+          .from('interview_questions')
+          .insert(questionsToInsert);
+        
+        if (questionsError) throw questionsError;
+      }
+      
+      toast({
+        title: "Interview created",
+        description: "Your AI interview has been created successfully.",
+      });
+      
+      navigate(`/interview/${interviewData.id}`);
+      
+    } catch (error: any) {
+      console.error("Error creating interview:", error);
+      toast({
+        title: "Error",
+        description: error.message || "Failed to create interview. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  // Helper function to generate a random code
+  const generateRandomCode = (length: number) => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+  };
+  
+  // Helper function to generate a random password
+  const generateRandomPassword = () => {
+    return Math.random().toString(36).substring(2, 8).toUpperCase();
   };
   
   return (
@@ -152,7 +252,7 @@ const InterviewSetupPage = () => {
                   </div>
                   
                   <div className="flex justify-end">
-                    <Button onClick={() => setCurrentStep(2)}>
+                    <Button onClick={() => setCurrentStep(2)} disabled={!jobTitle.trim() || !jobDescription.trim()}>
                       Next: Add Custom Questions
                     </Button>
                   </div>
@@ -183,6 +283,7 @@ const InterviewSetupPage = () => {
                           size="icon"
                           onClick={() => handleRemoveCustomQuestion(index)}
                           className="mt-1"
+                          disabled={customQuestions.length === 1 && index === 0}
                         >
                           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -251,8 +352,8 @@ const InterviewSetupPage = () => {
                     <Button variant="outline" onClick={() => setCurrentStep(2)}>
                       Back
                     </Button>
-                    <Button onClick={handleCreateInterview}>
-                      Create Interview
+                    <Button onClick={handleCreateInterview} disabled={isLoading}>
+                      {isLoading ? "Creating..." : "Create Interview"}
                     </Button>
                   </div>
                 </div>

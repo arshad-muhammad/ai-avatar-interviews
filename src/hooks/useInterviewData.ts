@@ -63,11 +63,21 @@ export const useInterviewData = (userId: string | null) => {
           .eq('id', id)
           .single();
           
-        if (interviewError || !interview) {
+        if (interviewError) {
           console.error("Error loading interview:", interviewError);
           toast({
             title: "Error",
             description: "Failed to load interview details.",
+            variant: "destructive",
+          });
+          navigate('/');
+          return;
+        }
+        
+        if (!interview) {
+          toast({
+            title: "Error",
+            description: "Interview not found.",
             variant: "destructive",
           });
           navigate('/');
@@ -93,15 +103,17 @@ export const useInterviewData = (userId: string | null) => {
         
         setInterviewData({
           ...interview,
-          jobTitle: interview.jobs.title,
-          jobDescription: interview.jobs.description
+          jobTitle: interview.jobs?.title || "Job Position",
+          jobDescription: interview.jobs?.description || ""
         });
         
         if (questionData && questionData.length > 0) {
           setQuestions(questionData);
+          // Initialize responses array with empty strings
+          setResponses(Array(questionData.length).fill(''));
         } else {
           // Fallback demo questions if none are found
-          setQuestions([
+          const fallbackQuestions = [
             {
               id: "q1",
               question: "What experience do you have with React and other modern JavaScript frameworks?",
@@ -127,11 +139,11 @@ export const useInterviewData = (userId: string | null) => {
               question: "How do you handle feedback and criticism of your work?",
               order_number: 5
             }
-          ]);
+          ];
+          setQuestions(fallbackQuestions);
+          // Initialize responses array with empty strings for fallback questions
+          setResponses(Array(fallbackQuestions.length).fill(''));
         }
-        
-        // Initialize responses array with empty strings
-        setResponses(Array(questionData?.length || 5).fill(''));
       } catch (error) {
         console.error("Error in interview setup:", error);
         toast({
