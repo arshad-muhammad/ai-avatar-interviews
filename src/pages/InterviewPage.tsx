@@ -1,13 +1,17 @@
 
 import React, { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useToast } from '@/hooks/use-toast';
 import AvatarCanvas from '@/components/AvatarCanvas';
+import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/contexts/AuthContext';
 
 const InterviewPage = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
   
   // State for interview
   const [isLoading, setIsLoading] = useState(true);
@@ -15,36 +19,137 @@ const InterviewPage = () => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
   const [candidateName, setCandidateName] = useState('');
+  const [candidateId, setCandidateId] = useState<string | null>(null);
   const [isNameSubmitted, setIsNameSubmitted] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [responses, setResponses] = useState<string[]>([]);
   const [isCompleted, setIsCompleted] = useState(false);
+  const [questions, setQuestions] = useState<any[]>([]);
   
   // Load interview data
   useEffect(() => {
-    // In a real app, this would fetch from the API
-    const savedInterviewSetup = localStorage.getItem('interviewSetup');
-    
-    setTimeout(() => {
-      if (savedInterviewSetup) {
-        setInterviewData(JSON.parse(savedInterviewSetup));
-      } else {
-        // Fallback demo data
+    const loadInterview = async () => {
+      try {
+        // Check if this is a candidate accessing the interview
+        const storedCandidateId = localStorage.getItem('candidateId');
+        const storedInterviewId = localStorage.getItem('interviewId');
+        const storedCandidateName = localStorage.getItem('candidateName');
+        
+        if (storedCandidateId && storedInterviewId && storedCandidateName && storedInterviewId === id) {
+          // Candidate is already identified
+          setCandidateId(storedCandidateId);
+          setCandidateName(storedCandidateName);
+          setIsNameSubmitted(true);
+        }
+        
+        if (!id) {
+          toast({
+            title: "Error",
+            description: "Interview not found.",
+            variant: "destructive",
+          });
+          navigate('/');
+          return;
+        }
+        
+        // Fetch interview data
+        const { data: interview, error: interviewError } = await supabase
+          .from('interviews')
+          .select(`
+            id,
+            title,
+            job_id,
+            jobs:job_id (
+              title,
+              description
+            )
+          `)
+          .eq('id', id)
+          .single();
+          
+        if (interviewError || !interview) {
+          console.error("Error loading interview:", interviewError);
+          toast({
+            title: "Error",
+            description: "Failed to load interview details.",
+            variant: "destructive",
+          });
+          navigate('/');
+          return;
+        }
+        
+        // Fetch interview questions
+        const { data: questionData, error: questionsError } = await supabase
+          .from('interview_questions')
+          .select('*')
+          .eq('interview_id', id)
+          .order('order_number', { ascending: true });
+          
+        if (questionsError) {
+          console.error("Error loading questions:", questionsError);
+          toast({
+            title: "Error",
+            description: "Failed to load interview questions.",
+            variant: "destructive",
+          });
+          return;
+        }
+        
         setInterviewData({
-          jobTitle: 'Frontend Developer',
-          jobDescription: 'We are looking for a skilled frontend developer with React experience.',
-          questions: [
-            "What experience do you have with React and other modern JavaScript frameworks?",
-            "Can you describe a challenging project you worked on and how you overcame obstacles?",
-            "How do you stay updated with the latest industry trends and technologies?",
-            "Describe your approach to debugging a complex issue in a large codebase.",
-            "How do you handle feedback and criticism of your work?"
-          ]
+          ...interview,
+          jobTitle: interview.jobs.title,
+          jobDescription: interview.jobs.description
         });
+        
+        if (questionData && questionData.length > 0) {
+          setQuestions(questionData);
+        } else {
+          // Fallback demo questions if none are found
+          setQuestions([
+            {
+              id: "q1",
+              question: "What experience do you have with React and other modern JavaScript frameworks?",
+              order_number: 1
+            },
+            {
+              id: "q2",
+              question: "Can you describe a challenging project you worked on and how you overcame obstacles?",
+              order_number: 2
+            },
+            {
+              id: "q3",
+              question: "How do you stay updated with the latest industry trends and technologies?",
+              order_number: 3
+            },
+            {
+              id: "q4",
+              question: "Describe your approach to debugging a complex issue in a large codebase.",
+              order_number: 4
+            },
+            {
+              id: "q5",
+              question: "How do you handle feedback and criticism of your work?",
+              order_number: 5
+            }
+          ]);
+        }
+        
+        // Initialize responses array with empty strings
+        setResponses(Array(questionData?.length || 5).fill(''));
+      } catch (error) {
+        console.error("Error in interview setup:", error);
+        toast({
+          title: "Error",
+          description: "Something went wrong. Please try again.",
+          variant: "destructive",
+        });
+      } finally {
+        setIsLoading(false);
       }
-      setIsLoading(false);
-    }, 1500);
-  }, []);
+    };
+    
+    loadInterview();
+  }, [id, navigate, toast]);
   
   // Mock speech recognition
   const startRecording = () => {
@@ -77,21 +182,46 @@ const InterviewPage = () => {
     }, 30);
   };
   
-  const submitAnswer = () => {
+  const submitAnswer = async () => {
     // Save current response
     const updatedResponses = [...responses];
     updatedResponses[currentQuestionIndex] = transcript;
     setResponses(updatedResponses);
     
+    // If candidate is identified, save this response to the database
+    if (candidateId && questions[currentQuestionIndex]) {
+      try {
+        await supabase.from('candidate_responses').insert({
+          candidate_id: candidateId,
+          question_id: questions[currentQuestionIndex].id,
+          response: transcript,
+        });
+      } catch (error) {
+        console.error("Error saving response:", error);
+      }
+    }
+    
     // Check if interview is complete
-    if (currentQuestionIndex === (interviewData?.questions.length || 0) - 1) {
+    if (currentQuestionIndex === (questions.length || 0) - 1) {
       setIsCompleted(true);
+      
+      // Update candidate status if applicable
+      if (candidateId) {
+        try {
+          await supabase
+            .from('candidates')
+            .update({ status: 'completed' })
+            .eq('id', candidateId);
+        } catch (error) {
+          console.error("Error updating candidate status:", error);
+        }
+      }
       
       // Save interview results
       const results = {
         candidateName,
         jobTitle: interviewData?.jobTitle,
-        questions: interviewData?.questions,
+        questions: questions.map(q => q.question),
         responses: updatedResponses
       };
       localStorage.setItem('interviewResults', JSON.stringify(results));
@@ -121,7 +251,14 @@ const InterviewPage = () => {
   };
   
   const finishInterview = () => {
-    navigate('/feedback/1234');
+    // For candidates, clear the session data
+    if (candidateId) {
+      localStorage.removeItem('candidateId');
+      localStorage.removeItem('candidateName');
+      localStorage.removeItem('interviewId');
+    }
+    
+    navigate(candidateId ? '/' : `/feedback/${id}`);
   };
   
   if (isLoading) {
@@ -194,7 +331,7 @@ const InterviewPage = () => {
                   </p>
                   
                   <Button onClick={finishInterview} size="lg">
-                    View Results
+                    {candidateId ? "Return to Home" : "View Results"}
                   </Button>
                 </div>
               </div>
@@ -203,7 +340,7 @@ const InterviewPage = () => {
                 <div className="mb-6">
                   <div className="flex items-center justify-between mb-1">
                     <p className="text-sm font-medium text-gray-500">
-                      Question {currentQuestionIndex + 1} of {interviewData?.questions.length}
+                      Question {currentQuestionIndex + 1} of {questions.length}
                     </p>
                     <p className="text-sm font-medium text-gray-500">
                       Candidate: {candidateName}
@@ -212,14 +349,14 @@ const InterviewPage = () => {
                   <div className="w-full bg-gray-200 rounded-full h-2">
                     <div 
                       className="bg-brand-blue h-2 rounded-full" 
-                      style={{ width: `${((currentQuestionIndex + 1) / (interviewData?.questions.length || 1)) * 100}%` }}
+                      style={{ width: `${((currentQuestionIndex + 1) / (questions.length || 1)) * 100}%` }}
                     ></div>
                   </div>
                 </div>
                 
                 <div className="bg-white p-6 rounded-lg shadow mb-6">
                   <h3 className="text-lg font-medium mb-2">
-                    {interviewData?.questions[currentQuestionIndex]}
+                    {questions[currentQuestionIndex]?.question || "Loading question..."}
                   </h3>
                 </div>
                 
@@ -258,7 +395,7 @@ const InterviewPage = () => {
                     disabled={isRecording || !transcript}
                     className="flex-1"
                   >
-                    {currentQuestionIndex === (interviewData?.questions.length || 0) - 1 ? "Finish Interview" : "Next Question"}
+                    {currentQuestionIndex === (questions.length || 0) - 1 ? "Finish Interview" : "Next Question"}
                   </Button>
                 </div>
               </>
